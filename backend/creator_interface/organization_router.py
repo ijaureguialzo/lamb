@@ -1650,7 +1650,7 @@ class OrgAdminApiSettings(BaseModel):
     openai_api_key: Optional[str] = Field(None, description="OpenAI API key")
     openai_base_url: Optional[str] = Field(None, description="OpenAI API base URL (from OPENAI_BASE_URL env var)")
     ollama_base_url: Optional[str] = Field(None, description="Ollama server base URL (from OLLAMA_BASE_URL env var)")
-    available_models: Optional[List[str]] = Field(None, description="List of available models (deprecated)")
+    available_models: Optional[Any] = Field(None, description="Available models (dict or list)")
     model_limits: Optional[Dict[str, Any]] = Field(None, description="Model usage limits")
     selected_models: Optional[Dict[str, List[str]]] = Field(None, description="Selected models per provider")
     default_models: Optional[Dict[str, str]] = Field(None, description="Default model per provider")
