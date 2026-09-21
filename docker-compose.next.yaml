@@ -28,6 +28,13 @@ services:
       OWI_ADMIN_PASSWORD: ${OWI_ADMIN_PASSWORD?Set OWI_ADMIN_PASSWORD}
       LAMB_LIBRARY_SERVER: http://library-manager:9091
       LAMB_LIBRARY_TOKEN: ${LAMB_LIBRARY_TOKEN?Set LAMB_LIBRARY_TOKEN}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-lamb.rule=Host(`${FQDN_LAMB:-lamb.test}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-lamb.entrypoints=websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-lamb.tls=true"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-lamb.loadbalancer.server.port=9099"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-lamb.loadbalancer.server.scheme=http"
     ports:
       - "9099:9099"
     volumes:
@@ -101,6 +108,20 @@ services:
       WEBUI_AUTH_TRUSTED_NAME_HEADER: ${WEBUI_AUTH_TRUSTED_NAME_HEADER:-X-User-Name}
       DEFAULT_USER_ROLE: ${DEFAULT_USER_ROLE:-user}
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-}
+      # Allow OpenWebUI's JWT 'token' cookie to be sent when the chat box is
+      # embedded cross-site inside a Moodle iframe (owi.test framed by moodle.test).
+      # A SameSite=Lax/Strict cookie is rejected by browsers in a cross-site
+      # context, so the iframe loads unauthenticated -> no model / chat broken.
+      # Cross-site cookies must be SameSite=None AND Secure.
+      WEBUI_SESSION_COOKIE_SAME_SITE: "none"
+      WEBUI_SESSION_COOKIE_SECURE: "true"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-owi.rule=Host(`${FQDN_LAMB:-owi.test}`)"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-owi.entrypoints=websecure"
+      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-owi.tls=true"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-owi.loadbalancer.server.port=8080"
+      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-owi.loadbalancer.server.scheme=http"
     ports:
       - "8080:8080"
     volumes:
