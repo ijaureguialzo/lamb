@@ -46,6 +46,11 @@ ensure_env() {
   fi
 }
 
+build() {
+  log "building containers"
+  docker compose -f "${COMPOSE_FILE}" build
+}
+
 up() {
   log "starting containers"
   docker compose -f "${COMPOSE_FILE}" up -d --force-recreate
@@ -142,9 +147,10 @@ usage() {
   cat <<USAGE
 lambctl -- LAMB Next deploy orchestrator
   setup     env + up + admin-fix + ollama-fix   (default)
-  up        start containers + wait
-  down      stop containers (data preserved)
-  destroy   remove containers + volumes
+  build     build containers
+  start     start containers + wait
+  stop      stop containers (data preserved)
+  clean.    remove containers + volumes
   admin-fix / ollama-fix   run a single fix
   rebuild   destroy + clean redeploy
   status    show stack + verify admin roles
@@ -155,6 +161,7 @@ case "${1:-setup}" in
   setup|deploy) ensure_env; up; run_admin_fix; run_ollama_fix; status_;;
   up)           up;;
   down)         down;;
+  build)         build;;
   destroy)      destroy;;
   admin-fix)    run_admin_fix;;
   ollama-fix)   run_ollama_fix;;

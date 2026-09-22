@@ -8,13 +8,16 @@ help:
 setup:
 	@./lambctl.sh setup
 
-up:
+build:
+	@./lambctl.sh build
+
+start:
 	@./lambctl.sh up
 
-down:
+stop:
 	@./lambctl.sh down
 
-destroy:
+clean:
 	@./lambctl.sh destroy
 
 admin-fix:
