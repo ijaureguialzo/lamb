@@ -115,6 +115,17 @@ services:
       # Cross-site cookies must be SameSite=None AND Secure.
       WEBUI_SESSION_COOKIE_SAME_SITE: "none"
       WEBUI_SESSION_COOKIE_SECURE: "true"
+      # ---- LAMB assistant integration (durable; re-applied on any fresh volume) ----
+      # OpenWebUI talks to two OpenAI-compatible backends:
+      #  slot 0: local Ollama  (host.docker.internal:11434/v1)
+      #  slot 1: LAMB backend  (lamb:9099/v1) -> serves published assistants as
+      #          `lamb_assistant.<id>` via /v1/chat/completions and lists them via
+      #          /v1/models, so they appear as selectable models in the chat that
+      #          Moodle launches. Keys are parallel to the URLs (';' separated):
+      #          Ollama needs no real key ("" ok), LAMB needs LAMB_BEARER_TOKEN.
+      OPENAI_API_BASE_URLS: "http://host.docker.internal:11434/v1;http://lamb:9099/v1"
+      OPENAI_API_KEYS: ";${LAMB_BEARER_TOKEN}"
+      DEFAULT_MODELS: "qwen3.6:35b-mlx"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-owi.rule=Host(`${FQDN_LAMB:-owi.test}`)"
