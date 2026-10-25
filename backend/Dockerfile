@@ -17,6 +17,22 @@ COPY frontend/svelte-app/ ./
 RUN test -f static/config.js || cp static/config.js.sample static/config.js
 RUN npm run build
 
+# LTI module app (lamb-0.8): built into /frontend/build/m/ next to the Creator app
+WORKDIR /frontend/module-chat
+COPY frontend/module-chat/package.json ./package.json
+RUN npm install
+COPY frontend/module-chat/ ./
+RUN test -f static/config.js || cp static/config.js.sample static/config.js
+RUN npm run build
+
+# LTI module app (lamb-0.8): built into /frontend/build/m/ next to the Creator app
+WORKDIR /frontend/module-file-eval
+COPY frontend/module-file-eval/package.json ./package.json
+RUN npm install
+COPY frontend/module-file-eval/ ./
+RUN test -f static/config.js || cp static/config.js.sample static/config.js
+RUN npm run build
+
 FROM ${PYTHON_IMAGE} AS runtime
 WORKDIR /app/backend
 
@@ -24,7 +40,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PORT=9099
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl git && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt

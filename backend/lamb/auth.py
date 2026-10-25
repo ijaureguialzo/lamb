@@ -74,6 +74,8 @@ def create_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
         Encoded JWT string.
     """
     to_encode = data.copy()
+    from lamb.lti13.store import session_claims
+    to_encode.update(session_claims(data))
     expire = datetime.now(timezone.utc) + (expires_delta or DEFAULT_TOKEN_EXPIRY)
     to_encode["exp"] = expire
     to_encode["iat"] = datetime.now(timezone.utc)
@@ -88,10 +90,22 @@ def decode_token(token: str) -> Optional[dict]:
         Decoded payload dict, or None if the token is invalid/expired.
     """
     try:
-        return jwt.decode(token, _get_jwt_secret(), algorithms=["HS256"])
+        payload = jwt.decode(token, _get_jwt_secret(), algorithms=["HS256"])
     except jwt.ExpiredSignatureError:
         logger.debug("Token expired")
         return None
     except jwt.InvalidTokenError as e:
         logger.debug(f"Invalid token: {e}")
         return None
+    # An administrator acting as a creator (#523): valid only while the takeover is active,
+    # so ending it or letting it expire invalidates the token on every path.
+    takeover = payload.get("takeover")
+    if takeover is not None:
+        from lamb.services.takeover import is_active
+        if not isinstance(takeover, dict) or not is_active(str(takeover.get("id", ""))):
+            logger.debug("Takeover token no longer active")
+            return None
+    from lamb.lti13.store import session_active
+    if not session_active(payload):
+        return None
+    return payload

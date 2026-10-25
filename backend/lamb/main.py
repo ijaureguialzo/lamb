@@ -13,7 +13,6 @@ from .lti_users_router import router as lti_users_router
 from .lti_creator_router import router as lti_creator_router
 # REMOVED: owi_router - OWI endpoints removed for security (Dec 27, 2025)
 # OWI managers are still used internally as service classes
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 from .simple_lti.simple_lti_main import router as simple_lti_router
@@ -29,8 +28,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Mount the static directory
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Static files are served only by the guarded Creator application mount.
 
 db_manager = LambDatabaseManager()
 
@@ -95,6 +93,16 @@ async def read_simple_lti(request: Request):
 
 # REMOVED: /v1/OWI/users/direct-role-update endpoint (security risk - Dec 27, 2025)
 # Role management now handled through creator_interface with proper authentication
+
+# Activity module API routers (file_evaluation, etc.) — must live on this app because
+# the root server mounts this app at /lamb; routes registered only on the parent would
+# never match (the mount handles all /lamb/* first).
+from lamb.modules import discover_modules as _discover_activity_modules, get_all_modules as _get_activity_modules
+
+_discover_activity_modules()
+for _mod in _get_activity_modules():
+    for _router in _mod.get_routers():
+        app.include_router(_router, prefix=f"/v1/modules/{_mod.name}")
 
 if __name__ == "__main__":
     import uvicorn

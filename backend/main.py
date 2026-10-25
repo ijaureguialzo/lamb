@@ -29,6 +29,8 @@ from urllib.parse import urlparse
 
 import shutil
 import aiohttp
+import hashlib
+import hmac
 import os
 import importlib.util
 import time
@@ -45,11 +47,72 @@ import re
 from datetime import datetime, timedelta
 from lamb.database_manager import LambDatabaseManager
 from creator_interface.main import router as creator_router, start_news_cache_refresh_loop, stop_news_cache_refresh_loop
+from lamb.modules import discover_modules
 from lamb.logging_config import get_logger
 
 # Set up centralized logging
 logger = get_logger(__name__, component="MAIN")
 multimodal_logger = get_logger('multimodal', component="MAIN")
+
+
+def _resolve_facade_identity(request: Request):
+    """Resolve the caller of the OpenAI-compatible facade from the bearer token.
+
+    Returns one of:
+      - {"kind": "system"}                          the shared system token
+      - {"kind": "creator", "user_id", "organization_id", "email"}
+                                                     a valid creator API key
+      - None                                         no / invalid credential
+
+    A creator key is valid only when: it exists, is active, is unexpired, and
+    its organization has the ``api_access`` feature flag enabled.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.split("Bearer ", 1)[1].strip()
+    if not token:
+        return None
+    if hmac.compare_digest(token.encode("utf-8"), API_KEY.encode("utf-8")):
+        return {"kind": "system"}
+
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    db = LambDatabaseManager()
+    row = db.get_api_key_by_hash(key_hash)
+    if not row or row.get("status") != "active":
+        return None
+    expires_at = row.get("expires_at")
+    if expires_at and int(time.time()) > int(expires_at):
+        return None
+
+    org = db.get_organization_by_id(row["organization_id"])
+    features = (org or {}).get("config", {}).get("features", {})
+    if not features.get("api_access"):
+        return None
+
+    creator = db.get_creator_user_by_id(row["creator_user_id"])
+    if not creator:
+        return None
+    # A disabled account's keys stop working at once, like its session tokens (#256).
+    account = db.get_creator_user_by_email(creator["user_email"])
+    if not account or account.get("enabled") is False:
+        return None
+
+    db.touch_api_key(row["id"])
+    return {
+        "kind": "creator",
+        "user_id": row["creator_user_id"],
+        "organization_id": row["organization_id"],
+        "email": creator["user_email"],
+    }
+
+
+def _creator_published_assistant_ids(identity: dict) -> set:
+    """Set of assistant ids a creator key is allowed to see/use."""
+    db = LambDatabaseManager()
+    rows = db.get_published_assistants_for_org_user(
+        identity["organization_id"], identity["user_id"], identity["email"])
+    return {a["id"] for a in rows}
 
 # Lifespan context manager for startup and shutdown
 @asynccontextmanager
@@ -57,6 +120,74 @@ async def lifespan(app: FastAPI):
     """Handle startup and shutdown events and schedule DB maintenance jobs."""
     # Startup
     logger.info("Starting LAMB application")
+    from lamb.private_storage import data_root
+    # Fail visibly before serving if storage would fall back to cwd or static.
+    private_data_root = await asyncio.to_thread(data_root)
+    from lamb.moodle.storage import migrate_legacy_cache
+    await asyncio.to_thread(migrate_legacy_cache)
+
+    # Run database migrations once at startup (idempotent — the
+    # schema_version table ensures each migration only runs once even
+    # across multiple workers).
+    try:
+        from lamb.migrations import MigrationRunner
+        db = LambDatabaseManager()
+        MigrationRunner(db).apply_all()
+        from lamb.aac.frontend import get_mailbox
+        get_mailbox()
+        logger.info("Database migrations checked/applied successfully")
+    except Exception as e:
+        logger.error(f"Failed to run database migrations: {e}")
+        raise
+
+    discover_modules()
+    logger.info("Activity modules discovered")
+    
+    # --- LOG: Check which modules were discovered ---
+    from lamb.modules import get_all_modules
+    discovered = get_all_modules()
+    logger.info(f"Discovered {len(discovered)} module(s): {[m.name for m in discovered]}")
+
+    # --- Fix file_evaluation FKs if mod tables were created with wrong lti_activities name ---
+    try:
+        from lamb.modules.file_evaluation.migrations import (
+            repair_file_eval_schema_if_needed,
+            ensure_mod_file_eval_student_name_column,
+        )
+
+        _db_pre = LambDatabaseManager()
+        _conn_pre = _db_pre.get_connection()
+        if _conn_pre:
+            try:
+                repair_file_eval_schema_if_needed(_conn_pre, _db_pre.table_prefix)
+                ensure_mod_file_eval_student_name_column(_conn_pre)
+                _conn_pre.commit()
+            finally:
+                _conn_pre.close()
+    except Exception as repair_err:
+        logger.error(f"file_evaluation schema repair failed: {repair_err}")
+
+    # --- Apply module migrations (idempotent CREATE TABLE IF NOT EXISTS) ---
+    for module in discovered:
+        migrations = module.get_migrations()
+        if migrations:
+            _db = LambDatabaseManager()
+            conn = _db.get_connection()
+            if conn:
+                try:
+                    for sql in migrations:
+                        if sql and sql.strip():
+                            conn.execute(sql)
+                    conn.commit()
+                    logger.info(f"Applied {len(migrations)} migration(s) for module: {module.name}")
+                except Exception as mig_err:
+                    logger.error(f"Migration error for module {module.name}: {mig_err}")
+                finally:
+                    conn.close()
+
+    # Module HTTP routers are registered on lamb.main:app (see lamb/main.py) so they
+    # are reachable under /lamb/v1/modules/{name}/...
+
     await start_news_cache_refresh_loop()
     logger.info("News cache refresh loop started")
 
@@ -155,7 +286,13 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to start DB maintenance tasks: {e}")
     # --- end background-tasks setup ---
 
-    yield
+    from lamb.storage_lifecycle import cleanup_loop
+    storage_cleanup = asyncio.create_task(cleanup_loop(private_data_root), name='private_storage_cleanup')
+    try:
+        yield
+    finally:
+        storage_cleanup.cancel()
+        await asyncio.gather(storage_cleanup, return_exceptions=True)
 
     # Shutdown
     logger.info("Shutting down LAMB application")
@@ -202,7 +339,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+from lamb.document_static import DocumentAwareStaticFiles
+app.mount("/static", DocumentAwareStaticFiles(directory="static"), name="static")
+from lamb.aac.pack_loader import docs_root
+app.mount("/agent-docs", StaticFiles(directory=str(docs_root())), name="agent_docs")
 
 app.mount("/lamb", lamb_app)
 app.include_router(creator_router, prefix="/creator", tags=["Creator"])
@@ -254,6 +394,10 @@ def custom_openapi():
     return app.openapi_schema
 
 app.openapi = custom_openapi
+
+# Administrators acting as a creator (#523): mark the request, audit its writes.
+from lamb.services.takeover import TakeoverMiddleware
+app.add_middleware(TakeoverMiddleware)
 
 # Minimal CORS: allow everything (no credentials). Keep it tiny.
 app.add_middleware(
@@ -342,7 +486,17 @@ async def get_models(request: Request):
   
     # Only return published assistants (not deleted, not unpublished)
     assistants = helper_get_all_assistants(filter_deleted=True, filter_unpublished=True)
-    
+
+    # The system token (Open WebUI sends it) gets the full published list; a
+    # creator API key only that creator's own published assistants (owned +
+    # shared). No valid credential, no list (#519).
+    identity = _resolve_facade_identity(request)
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+    if identity["kind"] == "creator":
+        allowed = _creator_published_assistant_ids(identity)
+        assistants = [a for a in assistants if a["id"] in allowed]
+
     # Prepare response body
     response_body = {
         "object": "list",
@@ -612,26 +766,14 @@ async def generate_openai_chat_completion(request: Request):
     ```
     """
 
-    try:
-        api_key = request.headers.get("Authorization")
-        if api_key and api_key.startswith("Bearer "):
-            api_key = api_key.split("Bearer ")[1].strip()
-            logger.debug(f"API Key received: {api_key[:4]}...{api_key[-4:]}")
-            if   api_key != API_KEY:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key",
-                )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="No API key provided in request headers",
-            )
-    except Exception as e:
-        logger.error(f"Authentication error: {e}")
+    # Auth: accept either the shared system token or a valid creator API key.
+    # A creator key additionally restricts which assistants may be called
+    # (enforced below, once the assistant id is resolved from the model).
+    facade_identity = _resolve_facade_identity(request)
+    if facade_identity is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Authorization header",
+            detail="Invalid or missing API key",
         )
 
     # Log request details for debugging multimodal issues
@@ -797,6 +939,15 @@ async def generate_openai_chat_completion(request: Request):
         assistant_id = helper_get_assistant_id(form_data.model)
         logger.info(f"Processing assistant: {assistant_id}")
 
+        # A creator API key may only call its own published assistants.
+        if facade_identity.get("kind") == "creator":
+            allowed = _creator_published_assistant_ids(facade_identity)
+            if int(assistant_id) not in allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This API key is not authorized for the requested assistant.",
+                )
+
         # Define common headers
         request_id = f"req_{uuid.uuid4()}"
         processing_ms = str(random.randint(150, 450))
@@ -835,6 +986,10 @@ async def generate_openai_chat_completion(request: Request):
             multimodal_logger.debug(f"Response is dict with keys: {list(response.keys())}")
         return response
 
+    except HTTPException:
+        # Auth/authorization decisions (401/403) must reach the client as-is,
+        # not be reshaped into a 422 by the generic handler below.
+        raise
     except Exception as e:
         error_detail = {
             "error": str(e),
@@ -865,6 +1020,38 @@ if os.path.isdir(abs_frontend_build_dir):
     else:
         logger.warning(f"SvelteKit app directory not found: {svelte_app_dir}")
 
+    # For module-chat
+    module_chat_dir = os.path.join(abs_frontend_build_dir, "m", "chat")
+    module_chat_app_dir = os.path.join(module_chat_dir, "app")
+    
+    # LOG: Check if module-chat build exists
+    if os.path.isdir(module_chat_dir):
+        logger.info(f"✓ Module-chat build directory found at {module_chat_dir}")
+        try:
+            contents = os.listdir(module_chat_dir)
+            logger.info(f"  Contents: {contents}")
+        except Exception as e:
+            logger.warning(f"  Could not list contents: {e}")
+    else:
+        logger.error(f"✗ Module-chat build directory NOT found at {module_chat_dir}")
+        logger.error(f"  Available in frontend/build: {os.listdir(abs_frontend_build_dir)}")
+    
+    if os.path.isdir(module_chat_app_dir):
+        logger.info(f"Mounting module-chat SvelteKit assets from: {module_chat_app_dir} at /m/chat/app")
+        app.mount("/m/chat/app", StaticFiles(directory=module_chat_app_dir), name="module_chat_assets")
+    else:
+        logger.error(f"Module-chat app directory not found: {module_chat_app_dir}")
+
+    # For module-file-eval
+    module_file_eval_dir = os.path.join(abs_frontend_build_dir, "m", "file-eval")
+    module_file_eval_app_dir = os.path.join(module_file_eval_dir, "app")
+
+    if os.path.isdir(module_file_eval_app_dir):
+        logger.info(f"Mounting module-file-eval assets from: {module_file_eval_app_dir} at /m/file-eval/app")
+        app.mount("/m/file-eval/app", StaticFiles(directory=module_file_eval_app_dir), name="module_file_eval_assets")
+    else:
+        logger.info(f"Module-file-eval app directory not found (not built yet?): {module_file_eval_app_dir}")
+
     svelte_img_dir = os.path.join(abs_frontend_build_dir, "img")
     if os.path.isdir(svelte_img_dir):
         logger.info(f"Mounting images from: {svelte_img_dir} at /img")
@@ -891,6 +1078,49 @@ if os.path.isdir(abs_frontend_build_dir):
         logger.info(f"Serving config.js from: {config_js_path}")
     else:
         logger.warning(f"config.js not found: {config_js_path}")
+
+    # Module SPAs: static/config.js is emitted next to index.html (not under app/), so it is not
+    # covered by StaticFiles mounts at /m/chat/app and /m/file-eval/app. The catch-all would 404
+    # paths like m/file-eval/config.js. Serve explicitly (same pattern as /config.js for root SPA).
+    _minimal_lamb_config_js = b"window.LAMB_CONFIG = window.LAMB_CONFIG || {};\n"
+
+    module_chat_config_js = os.path.join(module_chat_dir, "config.js")
+
+    @app.get("/m/chat/config.js", include_in_schema=False)
+    async def get_module_chat_config_js():
+        if os.path.isfile(module_chat_config_js):
+            return FileResponse(module_chat_config_js, media_type="application/javascript")
+        logger.warning(
+            "module-chat build has no config.js at %s; serving minimal inline LAMB_CONFIG",
+            module_chat_config_js,
+        )
+        return Response(content=_minimal_lamb_config_js, media_type="application/javascript")
+
+    if os.path.isfile(module_chat_config_js):
+        logger.info(f"Serving module-chat config.js from: {module_chat_config_js}")
+    else:
+        logger.warning(
+            "Add frontend/packages/module-chat/static/config.js and rebuild m/chat to persist config on disk."
+        )
+
+    module_file_eval_config_js = os.path.join(module_file_eval_dir, "config.js")
+
+    @app.get("/m/file-eval/config.js", include_in_schema=False)
+    async def get_module_file_eval_config_js():
+        if os.path.isfile(module_file_eval_config_js):
+            return FileResponse(module_file_eval_config_js, media_type="application/javascript")
+        logger.warning(
+            "module-file-eval build has no config.js at %s; serving minimal inline LAMB_CONFIG",
+            module_file_eval_config_js,
+        )
+        return Response(content=_minimal_lamb_config_js, media_type="application/javascript")
+
+    if os.path.isfile(module_file_eval_config_js):
+        logger.info(f"Serving module-file-eval config.js from: {module_file_eval_config_js}")
+    else:
+        logger.warning(
+            "Add frontend/packages/module-file-eval/static/config.js and rebuild m/file-eval to persist config on disk."
+        )
 
     # 3. SPA Catch-all Route (Defined last to avoid overriding API routes)
     if os.path.isfile(frontend_index_html):
@@ -921,7 +1151,7 @@ if os.path.isdir(abs_frontend_build_dir):
             # e.g. /app/xxx.js, /img/yyy.png
             if '.' in full_path.split('/')[-1] and not full_path.endswith(".html"):
                  # Check if it's likely served by '/app' or '/img' mounts
-                 if full_path.startswith(('/app/', '/img/')):
+                 if full_path.startswith(('app/', 'img/', 'm/chat/app/', 'm/file-eval/app/')):
                       # Let the StaticFiles mount handle this (FastAPI does this automatically if the route isn't matched)
                       logger.debug(f"SPA Catch-all: Path '{full_path}' looks like a mounted asset, letting StaticFiles handle.")
                       # Return 404 here because if we reached this point, StaticFiles didn't find it.
@@ -933,7 +1163,23 @@ if os.path.isdir(abs_frontend_build_dir):
             else:
                 # If the path doesn't look like a static file asset (or is .html) and wasn't an API/static path,
                 # assume it's an SPA route and serve the main index.html file.
-                logger.debug(f"SPA Catch-all triggered for path: {full_path}. Serving index.html")
+                if full_path.startswith("m/chat"):
+                    module_chat_index = os.path.join(abs_frontend_build_dir, "m", "chat", "index.html")
+                    if os.path.isfile(module_chat_index):
+                        logger.debug(f"SPA Catch-all triggered for module-chat path: {full_path}. Serving m/chat/index.html")
+                        return FileResponse(module_chat_index)
+                    else:
+                        logger.warning(f"module-chat index.html not found at {module_chat_index}")
+
+                if full_path.startswith("m/file-eval"):
+                    module_fe_index = os.path.join(abs_frontend_build_dir, "m", "file-eval", "index.html")
+                    if os.path.isfile(module_fe_index):
+                        logger.debug(f"SPA Catch-all triggered for module-file-eval path: {full_path}. Serving m/file-eval/index.html")
+                        return FileResponse(module_fe_index)
+                    else:
+                        logger.warning(f"module-file-eval index.html not found at {module_fe_index}")
+
+                logger.debug(f"SPA Catch-all triggered for path: {full_path}. Serving root index.html")
                 return FileResponse(frontend_index_html)
     else:
         logger.error(f"index.html not found in frontend build directory: {frontend_index_html}")

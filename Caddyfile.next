@@ -14,7 +14,10 @@
     }
 
     handle /lamb/* {
-        uri strip_prefix /lamb
+        reverse_proxy lamb:9099
+    }
+
+    handle /static/* {
         reverse_proxy lamb:9099
     }
 
@@ -37,3 +40,6 @@
     encode gzip
     reverse_proxy openwebui:8080
 }
+
+# Optional sites (LLM access adds token-dealer/Caddyfile.llm here); no file, no site.
+import /etc/caddy/extra/*.caddy
