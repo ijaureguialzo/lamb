@@ -5,6 +5,7 @@ set -euo pipefail
 
 CONTAINER="lamb-lamb-1"
 COMPOSE_FILE="$(dirname "$0")/docker-compose.next.yaml"
+COMPOSE_FILE2="$(dirname "$0")/docker-compose.traefik.yml"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ADMIN_FIX="${SCRIPT_DIR}/apply_admin_fix.py"
 OLLAMA_FIX="${SCRIPT_DIR}/apply_ollama_fix.py"
@@ -48,12 +49,12 @@ ensure_env() {
 
 build() {
   log "building containers"
-  docker compose -f "${COMPOSE_FILE}" build
+  docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_FILE2}" build
 }
 
 up() {
   log "starting containers"
-  docker compose -f "${COMPOSE_FILE}" up -d --force-recreate
+  docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_FILE2}" up -d --force-recreate
   log "waiting for ${CONTAINER} healthy (max ~5 min)"
   for i in $(seq 1 60); do
     st="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${CONTAINER}" 2>/dev/null || echo unknown)"
@@ -71,12 +72,12 @@ up() {
 
 down() {
   log "stopping containers (volumes preserved)"
-  docker compose -f "${COMPOSE_FILE}" down --remove-orphans
+  docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_FILE2}" down --remove-orphans
 }
 
 destroy() {
   log "removing containers + volumes + images"
-  docker compose -f "${COMPOSE_FILE}" down -v --remove-orphans
+  docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_FILE2}" down -v --remove-orphans
 }
 
 run_admin_fix() {
@@ -116,7 +117,7 @@ rebuild() {
 
 status_() {
   log "stack:"
-  docker compose -f "${COMPOSE_FILE}" ps || true
+  docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_FILE2}" ps || true
   log "verifying admin role from DB"
   cat > /tmp/lamb_verify_roles.py <<'PY'
 import sqlite3, json

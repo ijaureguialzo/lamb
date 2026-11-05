@@ -32,13 +32,6 @@ services:
       OWI_ADMIN_PASSWORD: ${OWI_ADMIN_PASSWORD?Set OWI_ADMIN_PASSWORD}
       LAMB_LIBRARY_SERVER: http://library-manager:9091
       LAMB_LIBRARY_TOKEN: ${LAMB_LIBRARY_TOKEN?Set LAMB_LIBRARY_TOKEN}
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-lamb.rule=Host(`${FQDN_LAMB:-lamb.test}`)"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-lamb.entrypoints=websecure"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-lamb.tls=true"
-      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-lamb.loadbalancer.server.port=9099"
-      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-lamb.loadbalancer.server.scheme=http"
     ports:
       - "9099:9099"
     volumes:
@@ -133,13 +126,6 @@ services:
       OPENAI_API_BASE_URLS: "http://host.docker.internal:11434/v1;http://lamb:9099/v1"
       OPENAI_API_KEYS: ";${LAMB_BEARER_TOKEN}"
       DEFAULT_MODELS: "qwen3.6:35b-mlx"
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-owi.rule=Host(`${FQDN_LAMB:-owi.test}`)"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-owi.entrypoints=websecure"
-      - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-owi.tls=true"
-      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-owi.loadbalancer.server.port=8080"
-      - "traefik.http.services.${COMPOSE_PROJECT_NAME}-owi.loadbalancer.server.scheme=http"
     ports:
       - "8080:8080"
     volumes:
