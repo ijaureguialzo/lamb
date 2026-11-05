@@ -12,7 +12,7 @@ All endpoints are nested under /collections/{collection_id}/ingestion-jobs
 """
 
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, asc
@@ -188,12 +188,10 @@ async def list_ingestion_jobs(
     ),
     limit: int = Query(50, ge=1, le=200, description="Maximum items to return"),
     offset: int = Query(0, ge=0, description="Number of items to skip"),
-    sort_by: str = Query(
-        "created_at", 
-        description="Field to sort by",
-        enum=["created_at", "updated_at", "status", "original_filename", "file_size"]
-    ),
-    sort_order: str = Query("desc", description="Sort order", enum=["asc", "desc"])
+    sort_by: Literal[
+        "created_at", "updated_at", "status", "original_filename", "file_size"
+    ] = Query("created_at", description="Field to sort by"),
+    sort_order: Literal["asc", "desc"] = Query("desc", description="Sort order")
 ):
     """List all ingestion jobs for a collection with filtering and pagination."""
     
